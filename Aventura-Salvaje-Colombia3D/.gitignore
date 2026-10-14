@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Editores
+.vscode/
+.idea/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Datos locales generados por el juego
+resultados_aventura_salvaje.csv
+ranking_aventura_salvaje.csv
+error_aventura_salvaje.txt
