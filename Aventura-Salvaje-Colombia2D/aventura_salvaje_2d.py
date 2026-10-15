@@ -142,6 +142,152 @@ class CerebroPC:
             np.array([[dx, dy, int(en_suelo), int(suelo_adelante)]]))[0])
         return self.ACCIONES[a]
 # ----------------------------------------------------------------
+# SONIDO: todo se sintetiza con numpy (no hace falta ningún archivo)
+# ----------------------------------------------------------------
+SR = 44100
+VOL_MUSICA = 0.30
+VOL_EFECTOS = 0.55
+def _frec(m):
+    return 440.0 * 2 ** ((m - 69) / 12)
+def _osc(ph, tipo):
+    if tipo == "tri":
+        return (2 / np.pi) * np.arcsin(np.sin(ph))
+    if tipo == "cuad":
+        return 0.6 * np.sign(np.sin(ph))
+    return np.sin(ph)
+def _nota(f, dur, tipo="sin", vol=0.5, decay=4.0, ataque=0.008, f_fin=None):
+    n = int(SR * dur)
+    t = np.arange(n) / SR
+    fr = np.full(n, float(f)) if f_fin is None else np.linspace(f, f_fin, n)
+    ph = 2 * np.pi * np.cumsum(fr) / SR
+    env = np.minimum(1.0, t / ataque) * np.exp(-decay * t)
+    cola = min(n, int(SR * 0.01))
+    env[-cola:] *= np.linspace(1, 0, cola)
+    return _osc(ph, tipo) * env * vol
+def _ruido(dur, vol, decay, suave=0):
+    n = int(SR * dur)
+    r = np.random.uniform(-1, 1, n)
+    if suave:       # pasa-bajos: sonido grave y sordo
+        r = np.convolve(r, np.ones(suave) / suave, "same")
+    else:           # pasa-altos: sonido agudo (platillo)
+        r = np.diff(r, prepend=0)
+    return r * np.exp(-decay * np.arange(n) / SR) * vol
+def _mezclar(partes, dur):
+    buf = np.zeros(int(SR * dur))
+    for ini, arr in partes:
+        i = int(SR * ini)
+        fin = min(len(buf), i + len(arr))
+        if fin > i:
+            buf[i:fin] += arr[:fin - i]
+    return buf
+def _efectos():
+    return {
+        "salto":    _nota(320, 0.16, "tri", 0.45, 6, f_fin=680),
+        "aterriza": _mezclar([(0, _nota(150, 0.14, "sin", 0.8, 22, f_fin=55)),
+                              (0, _ruido(0.09, 0.35, 30, suave=40))], 0.15),
+        "fruta":    _mezclar([(0, _nota(988, 0.10, "tri", 0.45, 10)),
+                              (0.07, _nota(1319, 0.22, "tri", 0.45, 7))], 0.3),
+        "victoria": _mezclar([(0.00, _nota(_frec(72), 0.25, "tri", 0.4, 4)),
+                              (0.13, _nota(_frec(76), 0.25, "tri", 0.4, 4)),
+                              (0.26, _nota(_frec(79), 0.25, "tri", 0.4, 4)),
+                              (0.39, _nota(_frec(84), 0.9, "tri", 0.4, 2.5)),
+                              (0.39, _nota(_frec(76), 0.9, "tri", 0.25, 2.5)),
+                              (0.39, _nota(_frec(79), 0.9, "tri", 0.25, 2.5))], 1.35),
+        "derrota":  _mezclar([(0.00, _nota(_frec(67), 0.30, "tri", 0.4, 4)),
+                              (0.22, _nota(_frec(65), 0.30, "tri", 0.4, 4)),
+                              (0.44, _nota(_frec(63), 0.30, "tri", 0.4, 4)),
+                              (0.66, _nota(_frec(60), 0.70, "tri", 0.4, 3, f_fin=_frec(59)))], 1.4),
+        "mover":    _nota(660, 0.06, "sin", 0.4, 25),
+        "ok":       _mezclar([(0, _nota(784, 0.08, "tri", 0.4, 14)),
+                              (0.06, _nota(1046, 0.14, "tri", 0.4, 10))], 0.22),
+        "tick":     _nota(1000, 0.06, "sin", 0.45, 35),
+    }
+def _pista(bpm, melodia, bajo, acordes, ritmo):
+    """Una melodía por compás (8 corcheas; 0 = silencio), bajo, acordes de fondo y ritmo."""
+    cor = 60.0 / bpm / 2
+    comp = 8 * cor
+    partes = []
+    for i, (mel, (r, q), ac) in enumerate(zip(melodia, bajo, acordes)):
+        t0 = i * comp
+        for k, m in enumerate(mel):
+            if m:
+                partes.append((t0 + k * cor, _nota(_frec(m), cor * 1.7, "tri", 0.26, 3.5)))
+        for k, b in enumerate((r, q, r, q)):
+            partes.append((t0 + k * 2 * cor, _nota(_frec(b), cor * 2, "sin", 0.34, 3.0)))
+        for m in ac:
+            partes.append((t0, _nota(_frec(m), comp, "sin", 0.05, 1.0, ataque=0.25)))
+        if ritmo:
+            for k in range(8):
+                if k % 4 == 0:
+                    partes.append((t0 + k * cor, _nota(110, 0.12, "sin", 0.45, 28, f_fin=45)))
+                if k % 2 == 1:
+                    partes.append((t0 + k * cor, _ruido(0.04, 0.10, 60)))
+    buf = _mezclar(partes, comp * len(acordes))
+    buf *= 0.85 / max(1e-6, np.abs(buf).max())
+    buf[:100] *= np.linspace(0, 1, 100)
+    buf[-300:] *= np.linspace(1, 0, 300)
+    return buf
+def _musica_juego():
+    C, Am, F, G = (60, 64, 67), (57, 60, 64), (57, 60, 65), (59, 62, 67)
+    mel = [[72, 0, 76, 79, 76, 0, 72, 0], [69, 0, 72, 76, 72, 0, 69, 0],
+           [65, 0, 69, 72, 69, 0, 72, 77], [67, 71, 74, 0, 71, 0, 67, 0],
+           [76, 79, 84, 79, 76, 0, 79, 0], [81, 76, 72, 76, 69, 0, 72, 0],
+           [77, 0, 72, 69, 72, 77, 0, 72], [74, 0, 71, 67, 71, 74, 79, 0]]
+    bajo = [(48, 55), (45, 52), (41, 48), (43, 50)] * 2
+    return _pista(116, mel, bajo, [C, Am, F, G] * 2, True)
+def _musica_menu():
+    Am, F, C, G = (57, 60, 64), (53, 57, 60), (55, 60, 64), (55, 59, 62)
+    mel = [[76, 0, 72, 0, 69, 0, 72, 76], [77, 0, 76, 72, 69, 0, 0, 0],
+           [72, 0, 76, 0, 79, 0, 76, 0], [74, 0, 71, 0, 67, 0, 0, 0],
+           [76, 0, 79, 0, 81, 0, 79, 76], [77, 0, 81, 0, 77, 0, 72, 0],
+           [74, 0, 79, 0, 74, 0, 71, 0], [72, 0, 76, 0, 79, 0, 0, 0]]
+    bajo = [(45, 52), (41, 48), (48, 55), (43, 50), (45, 52), (41, 48), (43, 50), (48, 55)]
+    return _pista(84, mel, bajo, [Am, F, C, G, Am, F, G, C], False)
+def _a_sonido(w, canales):
+    a = (np.clip(w, -1, 1) * 32767 * 0.9).astype(np.int16)
+    if canales > 1:
+        a = np.column_stack([a] * canales)
+    return pygame.sndarray.make_sound(np.ascontiguousarray(a))
+class Sonido:
+    """Música de fondo (canal 0 reservado) y efectos. Si no hay audio, el juego sigue en silencio."""
+    def __init__(self):
+        global SR
+        self.ok = False
+        self.mudo = False
+        self.pista = None
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(SR, -16, 2, 512)
+            SR, _, canales = pygame.mixer.get_init()
+            self.fx = {n: _a_sonido(w, canales) for n, w in _efectos().items()}
+            for s in self.fx.values():
+                s.set_volume(VOL_EFECTOS)
+            self.pistas = {"menu": _a_sonido(_musica_menu(), canales),
+                           "juego": _a_sonido(_musica_juego(), canales)}
+            pygame.mixer.set_reserved(1)
+            self.canal = pygame.mixer.Channel(0)
+            self.ok = True
+        except Exception as ex:
+            print("Sin sonido:", ex)
+    def efecto(self, nombre, vol=1.0):
+        if self.ok and not self.mudo:
+            ch = self.fx[nombre].play()
+            if ch:
+                ch.set_volume(vol)
+    def musica(self, nombre):
+        if not self.ok or nombre == self.pista:
+            return
+        self.pista = nombre
+        if nombre is None:
+            self.canal.fadeout(500)
+        else:
+            self.canal.play(self.pistas[nombre], loops=-1, fade_ms=800)
+            self.canal.set_volume(0 if self.mudo else VOL_MUSICA)
+    def alternar(self):
+        self.mudo = not self.mudo
+        if self.ok:
+            self.canal.set_volume(0 if self.mudo else VOL_MUSICA)
+# ----------------------------------------------------------------
 # OBJETOS DEL JUEGO
 # ----------------------------------------------------------------
 class Plataforma:
@@ -183,12 +329,15 @@ class Jugador:
         return self.puntos + self.pts_nivel
     def mover(self, plataformas, dirx, salto):
         self.vx = dirx * self.vel
+        self.salto_ev = self.aterrizo = False
+        estaba = self.en_suelo
         if dirx:
             self.mira = dirx
             self.fase += 0.3
         if salto and self.en_suelo:
             self.vy = FUERZA_SALTO
             self.en_suelo = False
+            self.salto_ev = True
         self.vy = min(self.vy + GRAVEDAD, 14)
         self.x = max(0, min(ANCHO - self.ANCHO, self.x + self.vx))
         base_previa = self.y + self.ALTO
@@ -204,6 +353,7 @@ class Jugador:
                             mejor = p
             if mejor:
                 self.y = mejor.rect.top - self.ALTO
+                self.aterrizo = (not estaba) and self.vy > 3
                 self.vy = 0
                 self.en_suelo = True
                 self.en_extra = mejor.idx is None
@@ -261,71 +411,215 @@ def control_pc(j, plats, bandera, cerebro, cfg):
     return dirx, salto
 # ----------------------------------------------------------------
 # DIBUJO: ANIMALES
+#   Cada sprite se dibuja 4 veces más grande, con contorno, brillo en los
+#   ojos y mejillas, y se reduce con suavizado (queda sin dientes de sierra).
+#   Se guarda en caché por animal, cuadro de animación, pose y tamaño.
 # ----------------------------------------------------------------
-def dibujar_animal(s, clave, rect, mira, fase=0.0):
+SS = 4                      # factor de supersampling
+MARG_X, MARG_Y = 14, 16     # margen lógico alrededor del rect (orejas, cola, pico...)
+LIENZO = (34 + 2 * MARG_X, 40 + MARG_Y + 5)
+CUADROS = 16
+ROSA = (244, 168, 178)
+TINTA = (64, 48, 58)
+_CACHE_ANIMALES = {}
+def mezcla(a, b, t):
+    return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+class Pincel:
+    """Dibuja en coordenadas lógicas: (0, 0) es la esquina del rect del animal."""
+    def __init__(self, surf):
+        self.s = surf
+        self.dy = 0.0
+    def _p(self, x, y):
+        return int(round((x + MARG_X) * SS)), int(round((y + self.dy + MARG_Y) * SS))
+    def _r(self, x, y, w, h):
+        px, py = self._p(x, y)
+        return pygame.Rect(px, py, int(round(w * SS)), int(round(h * SS)))
+    def circ(self, col, x, y, r, borde=None, g=0.9):
+        c = self._p(x, y)
+        if borde:
+            pygame.draw.circle(self.s, borde, c, int(round((r + g) * SS)))
+        pygame.draw.circle(self.s, col, c, max(1, int(round(r * SS))))
+    def elip(self, col, x, y, w, h, borde=None, g=0.9):
+        if borde:
+            pygame.draw.ellipse(self.s, borde, self._r(x - g, y - g, w + 2 * g, h + 2 * g))
+        pygame.draw.ellipse(self.s, col, self._r(x, y, w, h))
+    def caja(self, col, x, y, w, h, rad, borde=None, g=0.9):
+        if borde:
+            pygame.draw.rect(self.s, borde, self._r(x - g, y - g, w + 2 * g, h + 2 * g),
+                             border_radius=int((rad + g) * SS))
+        pygame.draw.rect(self.s, col, self._r(x, y, w, h), border_radius=int(rad * SS))
+    def poli(self, col, pts, borde=None, g=0.9):
+        q = [self._p(x, y) for x, y in pts]
+        pygame.draw.polygon(self.s, col, q)
+        if borde:
+            pygame.draw.polygon(self.s, borde, q, max(1, int(g * 1.6 * SS)))
+    def lin(self, col, a, b, w=0.8):
+        pygame.draw.line(self.s, col, self._p(*a), self._p(*b), max(1, int(w * SS)))
+    def arco(self, col, x, y, w, h, a0, a1, wd=0.7):
+        pygame.draw.arc(self.s, col, self._r(x, y, w, h), a0, a1, max(1, int(wd * SS)))
+    def cadena(self, col, borde, pts):
+        """Círculos (x, y, r) unidos: primero todos los contornos y luego los rellenos."""
+        for x, y, r in pts:
+            self.circ(borde, x, y, r + 0.9)
+        for x, y, r in pts:
+            self.circ(col, x, y, r)
+def _ojo(p, x, y, r=3.2):
+    p.circ((255, 255, 255), x, y, r, TINTA, 0.6)
+    p.circ(TINTA, x + 0.8, y + 0.4, r * 0.62)
+    p.circ((255, 255, 255), x + 1.5, y - 0.6, r * 0.25)
+def _patas(p, col, borde, fase, aire, lista, ancho=7.0, y0=28.0):
+    """Patas que caminan (alternadas) o se recogen en el aire. Devuelve la posición de los pies."""
+    pies = []
+    for x, off, lejos in lista:
+        if aire:
+            dx, lev = (3.0 if x > 17 else -3.0), 3.0
+        else:
+            dx = math.sin(fase + off) * 3.2
+            lev = max(0.0, math.cos(fase + off)) * 2.4
+        c = mezcla(col, (0, 0, 0), 0.14) if lejos else col
+        yb = 40 - lev
+        p.caja(c, x + dx - ancho / 2, y0, ancho, yb - y0, ancho / 2.2, borde)
+        pies.append((x + dx, yb))
+    return pies
+def _pintar(clave, fase, aire):
     c = COLORES[clave]
-    f = mira
-    x, y, w, h = rect.x, rect.y, rect.w, rect.h
-    cx = x + w // 2
-    paso = math.sin(fase) * 4
-    for k, off in enumerate((-8, 8)):  # patas
-        dx = paso if k else -paso
-        pygame.draw.rect(s, c["acento"], (cx + off - 4 + dx * 0.5, y + h - 11, 8, 11),
-                         border_radius=4)
-    # cola
-    pygame.draw.circle(s, c["acento"], (cx - f * (w // 2 + 2), y + 24), 4)
-    # cuerpo y cabeza
-    pygame.draw.ellipse(s, c["cuerpo"], (x, y + 14, w, h - 20))
-    hx, hy = cx + f * 8, y + 13
-    pygame.draw.circle(s, c["cuerpo"], (hx, hy), 12)
-    def ojo(ox=5, oy=-2, r=3):
-        pygame.draw.circle(s, (255, 255, 255), (hx + f * ox, hy + oy), r)
-        pygame.draw.circle(s, (70, 60, 70), (hx + f * (ox + 1), hy + oy), max(1, r - 1))
+    cu, ac = c["cuerpo"], c["acento"]
+    borde = mezcla(ac, TINTA, 0.5)
+    claro = mezcla(cu, (255, 255, 255), 0.6)
+    mej = mezcla(cu, ROSA, 0.55)
+    surf = pygame.Surface((LIENZO[0] * SS, LIENZO[1] * SS), pygame.SRCALPHA)
+    surf.fill((*borde, 0))      # el borde transparente toma el color del contorno (sin halos)
+    p = Pincel(surf)
+    cuad = [(12, math.pi, True), (26, 0, True), (7, 0, False), (21, math.pi, False)]
+    bob = 0.0 if aire else abs(math.sin(fase)) * 1.1
+    onda = math.sin(fase) * 1.8
     if clave == "jaguar":
-        for ox in (-8, 8):
-            pygame.draw.circle(s, c["cuerpo"], (hx + ox, hy - 10), 5)
-            pygame.draw.circle(s, (250, 190, 190), (hx + ox, hy - 10), 2)
-        for ox, oy in ((6, 22), (16, 28), (25, 21), (11, 33), (27, 31)):
-            pygame.draw.circle(s, c["acento"], (x + ox, y + oy), 3)
-        pygame.draw.circle(s, c["acento"], (hx - 4, hy - 7), 2)
-        ojo()
-        pygame.draw.circle(s, (240, 160, 170), (hx + f * 11, hy + 3), 3)
+        p.cadena(cu, borde, [(1, 24, 2.6), (-3, 21, 2.6), (-6.5, 16 + onda * 0.3, 2.6),
+                             (-7 + onda * 0.5, 10.5, 2.6)])
+        p.circ(ac, -7 + onda * 0.5, 10.5, 2.7)
+        _patas(p, cu, borde, fase, aire, cuad)
+        p.dy = -bob
+        p.elip(cu, 1, 14, 32, 20, borde)
+        p.elip(claro, 7, 25, 20, 8)
+        for x, y in ((5, 21), (11, 18), (10, 26), (17, 27), (23, 27.5)):
+            p.circ(ac, x, y, 3.0)
+            p.circ(mezcla(cu, ac, 0.3), x, y, 1.4)
+        for x in (17.5, 30):
+            p.circ(cu, x, 3 if x < 20 else 3.6, 4.3, borde)
+            p.circ(ROSA, x, 3.4 if x < 20 else 4, 2.0)
+        p.circ(cu, 25, 11.5, 11, borde, 1.0)
+        for x, y in ((22, 4.5), (26, 3.5), (19.5, 8)):
+            p.circ(ac, x, y, 1.1)
+        p.elip(claro, 27.5, 11, 10, 8, borde, 0.8)
+        p.elip((222, 130, 150), 34.2, 11.8, 3.6, 2.6)
+        p.arco(TINTA, 30.5, 12.6, 5.5, 4, 3.5, 5.9, 0.5)
+        p.lin(TINTA, (31, 13.5), (38.5, 12.2), 0.5)
+        p.lin(TINTA, (31, 14.5), (38, 15.5), 0.5)
+        _ojo(p, 28.5, 8, 3.0)
+        p.elip(mej, 21.5, 12.5, 4.6, 2.8)
     elif clave == "oso":
-        for ox in (-9, 9):
-            pygame.draw.circle(s, c["acento"], (hx + ox, hy - 10), 5)
-        pygame.draw.ellipse(s, (250, 240, 226), (hx + f * 4 - 7, hy + 1, 14, 10))  # hocico
-        pygame.draw.circle(s, (250, 240, 226), (hx + f * 5, hy - 2), 7, 2)           # anteojos
-        pygame.draw.ellipse(s, (250, 240, 226), (cx - 8, y + 20, 16, 12))           # pecho
-        ojo(5, -2, 2)
-        pygame.draw.circle(s, (110, 90, 90), (hx + f * 11, hy + 4), 3)
+        p.circ(ac, 1.5, 23, 3, borde)
+        _patas(p, cu, borde, fase, aire, cuad)
+        p.dy = -bob
+        p.elip(cu, 1, 14, 32, 20, borde)
+        p.elip(claro, 14, 21, 14, 13)
+        for x, y in ((17, 3.5), (31, 4)):
+            p.circ(ac, x, y, 4.4, borde)
+            p.circ(claro, x, y + 0.2, 2.2)
+        p.circ(cu, 25, 12, 11, borde, 1.0)
+        p.elip(claro, 28, 12, 9.5, 8, borde, 0.8)
+        p.elip((92, 70, 78), 34.5, 12.4, 4, 3)
+        p.circ(claro, 28.8, 8.5, 4.7, borde, 0.7)       # anteojos
+        _ojo(p, 28.8, 8.5, 2.6)
+        p.arco(claro, 19, 2, 11, 8, 0.5, 2.6, 1.0)
+        p.elip(mej, 22, 14, 4.4, 2.8)
     elif clave == "perezoso":
-        pygame.draw.ellipse(s, c["acento"], (hx - 11, hy - 6, 22, 12))               # antifaz
-        pygame.draw.line(s, c["acento"], (cx + f * 4, y + 20), (cx + f * 4, y + 34), 4)
-        for k in (-2, 0, 2):
-            pygame.draw.line(s, (120, 100, 90), (cx + f * 4 + k, y + 34), (cx + f * 4 + k, y + 38), 1)
-        ojo(5, -1, 2)
-        pygame.draw.arc(s, (110, 90, 90), (hx + f * 3 - 4, hy, 10, 8), 3.4, 6.0, 2)  # sonrisa
+        for x in (5, 10, 15, 20, 25, 30):                # pelaje desgreñado
+            p.poli(cu, [(x - 2.6, 18), (x + (x % 3) - 1, 12.5), (x + 2.6, 18)], borde)
+        for x in (7, 13, 19, 25):
+            p.poli(cu, [(x - 2.6, 31), (x, 36.5), (x + 2.6, 31)], borde)
+        pies = _patas(p, cu, borde, fase, aire, cuad)
+        for px, yb in (pies[1], pies[3]):                # garras largas
+            for k in (-2, 0, 2):
+                p.lin(borde, (px + k * 0.8, yb - 1), (px + k * 1.1, yb + 2.6), 1.7)
+                p.lin((240, 228, 204), (px + k * 0.8, yb - 1), (px + k * 1.1, yb + 2.4), 0.9)
+        p.dy = -bob
+        p.elip(cu, 1, 14, 32, 20, borde)
+        p.elip(claro, 7, 25, 20, 8)
+        p.circ(mezcla(cu, claro, 0.35), 24, 11, 10.5, borde, 1.0)
+        p.elip(claro, 23, 5, 13, 13)
+        p.elip(ac, 23.5, 6.5, 10.5, 7)                   # antifaz
+        _ojo(p, 28.5, 10, 2.4)
+        p.elip(TINTA, 33.5, 11.8, 3.2, 2.4)
+        p.arco(TINTA, 28, 12.5, 7, 4.5, 3.5, 6.0, 0.6)
+        p.elip(mej, 22.5, 13, 4.2, 2.6)
     elif clave == "chiguiro":
-        pygame.draw.ellipse(s, c["cuerpo"], (hx + f * 4 - 9, hy - 2, 20, 15))        # hocico
-        for ox in (-8, 8):
-            pygame.draw.circle(s, c["acento"], (hx + ox, hy - 10), 3)
-        ojo(3, -4, 2)
-        pygame.draw.circle(s, (120, 95, 90), (hx + f * 12, hy + 3), 3)
+        _patas(p, cu, borde, fase, aire, cuad)
+        p.dy = -bob
+        p.elip(cu, 0, 13, 33, 22, borde)
+        p.elip(claro, 5, 26, 21, 8)
+        for x, y in ((6, 19), (11, 17.5), (16, 18.5)):
+            p.lin(ac, (x, y), (x + 3, y - 0.8), 0.8)
+        p.caja(cu, 17, 4, 19, 17, 7.5, borde)
+        p.circ(ac, 20.5, 4.5, 2.4, borde)
+        p.elip(mezcla(cu, ac, 0.35), 28.5, 6, 8, 12)
+        p.elip(TINTA, 33.2, 7.4, 2, 2.8)
+        p.circ(TINTA, 25.8, 8.6, 1.9)
+        p.circ((255, 255, 255), 26.4, 8, 0.6)
+        p.lin(borde, (36, 16.2), (31.5, 17.2), 0.7)
+        p.elip(mej, 22.5, 14, 4.2, 2.6)
     elif clave == "condor":
-        pygame.draw.ellipse(s, c["acento"], (x + 3, y + 17, w - 10, 17))             # ala
-        pygame.draw.ellipse(s, (255, 255, 255), (cx - 11 + f * 4, y + 17, 22, 8))    # collar
-        pygame.draw.circle(s, (246, 214, 214), (hx, hy), 10)                          # cabeza
-        pygame.draw.polygon(s, (255, 226, 130), [(hx + f * 8, hy - 3), (hx + f * 18, hy + 3),
-                                                   (hx + f * 8, hy + 6)])
-        ojo(3, -2, 2)
+        p.poli(ac, [(5, 22), (-6, 25), (-5, 30), (3, 29)], borde)    # cola
+        p.poli(ac, [(6, 20), (-5, 19), (-6, 24), (4, 25)], borde)
+        _patas(p, (240, 208, 120), borde, fase, aire, [(13, math.pi, True), (21, 0, False)],
+               ancho=3.6, y0=30)
+        p.dy = -bob
+        p.elip(cu, 1, 15, 31, 19, borde)
+        p.elip(claro, 8, 24, 17, 8)
+        wy = 8 if aire else 18                                         # ala: abierta en el aire
+        p.poli(ac, [(3, wy + 7), (-5, wy + 12), (7, wy + 11)], borde)
+        p.poli(ac, [(5, wy + 9.5), (-2, wy + 14.5), (10, wy + 12.5)], borde)
+        p.elip(ac, 2, wy, 22, 13, borde)
+        p.cadena((255, 255, 255), borde, [(19.5, 14.5, 4), (25, 16.5, 4.2), (30.5, 15, 4), (32.5, 11.5, 3)])
+        p.elip((224, 138, 150), 24, 0.5, 7, 3.6, borde)               # cresta
+        p.circ((240, 206, 206), 27.5, 8, 7.5, borde)
+        p.poli((255, 226, 130), [(33, 5), (39, 6.2), (42, 10.2), (38.2, 9.2), (33.5, 11)], borde)
+        _ojo(p, 29.5, 6.5, 2.4)
     elif clave == "rana":
-        for ox in (-6, 6):
-            pygame.draw.circle(s, c["cuerpo"], (hx + ox, hy - 10), 6)
-            pygame.draw.circle(s, (255, 255, 255), (hx + ox, hy - 10), 4)
-            pygame.draw.circle(s, (70, 60, 70), (hx + ox + f, hy - 10), 2)
-        for ox, oy in ((6, 24), (15, 29), (24, 23)):
-            pygame.draw.circle(s, c["acento"], (x + ox, y + oy), 3)
-        pygame.draw.arc(s, (150, 110, 100), (hx - 8, hy - 1, 16, 10), 3.4, 6.0, 2)
+        p.dy = 0
+        _patas(p, cu, borde, fase, aire, [(27, math.pi, True), (21, 0, False)], ancho=5, y0=30)
+        pata = mezcla(cu, ac, 0.45)
+        fx = -2 + (-3 if aire else math.sin(fase) * 2)
+        fy = 32 if aire else 35
+        p.elip(pata, fx, fy, 12, 5, borde)                              # pie trasero
+        p.dy = -bob
+        p.elip(cu, 1, 17, 32, 18, borde)
+        p.elip(claro, 8, 26, 19, 8)
+        for x, y in ((7, 23), (12, 21), (7.5, 28), (14, 28)):
+            p.circ(ac, x, y, 2.1)
+        p.elip(pata, 2, 22, 13, 14, borde)                              # muslo
+        p.elip(cu, 13, 9, 23, 17, borde)
+        for x, y in ((21, 8), (30, 7)):
+            p.circ(cu, x, y, 5.2, borde)
+        _ojo(p, 21.5, 7.8, 3.3)
+        _ojo(p, 30.5, 6.8, 3.3)
+        p.arco(borde, 17, 11.5, 19, 9.5, 3.5, 5.95, 0.7)
+        p.elip(mezcla(cu, ROSA, 0.6), 29, 16, 4.6, 2.6)
+        p.circ(borde, 34.5, 12, 0.7)
+    return surf
+def dibujar_animal(s, clave, rect, mira, fase=0.0, aire=False):
+    k = rect.w / 34
+    q = int((fase % math.tau) / math.tau * CUADROS) % CUADROS
+    llave = (clave, q, bool(aire), rect.w, mira >= 0)
+    img = _CACHE_ANIMALES.get(llave)
+    if img is None:
+        grande = _pintar(clave, q * math.tau / CUADROS, aire)
+        tam = (max(1, round(LIENZO[0] * k)), max(1, round(LIENZO[1] * k)))
+        img = pygame.transform.smoothscale(grande, tam)
+        if mira < 0:
+            img = pygame.transform.flip(img, True, False)
+        _CACHE_ANIMALES[llave] = img
+    s.blit(img, (rect.x - MARG_X * k, rect.y - MARG_Y * k))
 # ----------------------------------------------------------------
 # DIBUJO: ESCENARIOS
 # ----------------------------------------------------------------
@@ -445,6 +739,7 @@ def cargar_ranking(maximo=8):
 # ----------------------------------------------------------------
 class Juego:
     def __init__(self):
+        pygame.mixer.pre_init(SR, -16, 2, 512)
         pygame.init()
         self.pantalla = pygame.display.set_mode((ANCHO, ALTO))
         pygame.display.set_caption("Aventura Salvaje Colombia")
@@ -456,6 +751,7 @@ class Juego:
         self.f_peq = pygame.font.SysFont(nombres, 20)
         self.f_min = pygame.font.SysFont(nombres, 16, bold=True)
         self.cerebro = CerebroPC()
+        self.sonido = Sonido()
         self.estado = "menu"
         self.modo = 0
         self.dif = 1
@@ -516,6 +812,8 @@ class Juego:
                 if e.type == pygame.QUIT:
                     pygame.quit()
                     sys.exit()
+                elif e.type == pygame.KEYDOWN and e.key == pygame.K_m and self.estado != "nombres":
+                    self.sonido.alternar()
             if self.estado == "menu":
                 self.menu(eventos)
             elif self.estado == "dificultad":
@@ -532,12 +830,18 @@ class Juego:
                 self.final(eventos)
             elif self.estado == "ranking":
                 self.pantalla_ranking(eventos)
+            self.sonido.musica(self.musica_deseada())
             pygame.display.flip()
             self.reloj.tick(FPS)
+    def musica_deseada(self):
+        if self.estado == "jugando":
+            return "juego" if self.ganador is None else None
+        return "menu"
     # ---------- MENÚ ----------
     def elegir_modo(self):
         _, humanos, pcs = MODOS[self.modo]
         if pcs:
+            self.sonido.efecto("ok")
             self.estado = "dificultad"
         else:
             self.cfg = DIFICULTADES[1]
@@ -547,8 +851,10 @@ class Juego:
             if e.type == pygame.KEYDOWN:
                 if e.key in (pygame.K_UP, pygame.K_w):
                     self.modo = (self.modo - 1) % 3
+                    self.sonido.efecto("mover")
                 elif e.key in (pygame.K_DOWN, pygame.K_s):
                     self.modo = (self.modo + 1) % 3
+                    self.sonido.efecto("mover")
                 elif e.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                     self.modo = e.key - pygame.K_1
                     self.elegir_modo()
@@ -566,7 +872,7 @@ class Juego:
         for k, clave in enumerate(ANIMALES.index):
             rect = pygame.Rect(210 + k * 125, 500, 34, 40)
             dibujar_animal(self.pantalla, clave, rect, 1, self.t * 0.15 + k)
-        self.ayuda("5 niveles · Frutas +1 · Bandera +5   |   R: Ver ranking", 580)
+        self.ayuda("5 niveles · Frutas +1 · Bandera +5   |   R: ranking  ·  M: sonido", 580)
     # ---------- DIFICULTAD ----------
     def pantalla_dificultad(self, eventos):
         for e in eventos:
@@ -577,8 +883,10 @@ class Juego:
                 return
             if e.key in (pygame.K_UP, pygame.K_w):
                 self.dif = (self.dif - 1) % 3
+                self.sonido.efecto("mover")
             elif e.key in (pygame.K_DOWN, pygame.K_s):
                 self.dif = (self.dif + 1) % 3
+                self.sonido.efecto("mover")
             elif e.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                 self.dif = e.key - pygame.K_1
                 self.cfg = DIFICULTADES[self.dif]
@@ -599,6 +907,7 @@ class Juego:
     def iniciar_nombres(self):
         self.nombres = []
         self.entrada = ""
+        self.sonido.efecto("ok")
         self.estado = "nombres"
     def pantalla_nombres(self, eventos):
         humanos = MODOS[self.modo][1]
@@ -662,13 +971,17 @@ class Juego:
                     continue
                 if e.key in izq:
                     self.cursor[i] = (self.cursor[i] - 1) % len(claves)
+                    self.sonido.efecto("mover")
                 elif e.key in der:
                     self.cursor[i] = (self.cursor[i] + 1) % len(claves)
+                    self.sonido.efecto("mover")
                 elif e.key in ok:
                     otros = [self.cursor[k] for k in range(humanos) if k != i and self.listo[k]]
                     if self.cursor[i] not in otros:
                         self.listo[i] = True
+                        self.sonido.efecto("ok")
             if e.key == pygame.K_RETURN and all(self.listo):
+                self.sonido.efecto("ok")
                 self.crear_partida()
                 return
         self.pantalla.blit(self.fondo_menu, (0, 0))
@@ -752,26 +1065,35 @@ class Juego:
                 dirx = int(any(teclas[k] for k in j.teclas["der"])) - int(any(teclas[k] for k in j.teclas["izq"]))
                 salto = any(teclas[k] for k in j.teclas["salto"])
             j.mover(self.todas, dirx, salto)
+            if j.salto_ev:
+                self.sonido.efecto("salto", 0.45 if j.es_pc else 1.0)
+            if j.aterrizo:
+                self.sonido.efecto("aterriza", 0.35 if j.es_pc else 0.8)
             r = j.rect
             for fr in self.frutas[:]:
                 if r.colliderect(fr):
                     self.frutas.remove(fr)
                     j.frutas += 1
                     j.pts_nivel += PUNTOS_FRUTA
+                    self.sonido.efecto("fruta", 0.45 if j.es_pc else 1.0)
                     self.chispas(fr.centerx, fr.centery, NIVELES[self.nivel]["fruta"])
             if not congelado and r.colliderect(self.bandera):
                 j.llego = True
                 j.pts_nivel += PUNTOS_BANDERA
                 self.ganador = j
                 self.cuenta_final = 110
+                self.sonido.efecto("derrota" if j.es_pc else "victoria")
                 for _ in range(5):
                     self.chispas(self.bandera.centerx, self.bandera.top, random.choice(
                         [(255, 236, 150), (160, 190, 238), (242, 160, 164)]), 14)
         if self.ganador is None:
             self.tiempo -= 1
+            if 0 < self.tiempo <= 10 * FPS and self.tiempo % FPS == 0:
+                self.sonido.efecto("tick")
             if self.tiempo <= 0:
                 self.cuenta_final = 1
                 self.ganador = False  # tiempo agotado
+                self.sonido.efecto("derrota")
         if self.ganador is not None:
             self.cuenta_final -= 1
             if self.cuenta_final <= 0:
@@ -786,7 +1108,7 @@ class Juego:
             dibujar_fruta(s, fr, d["fruta"])
         cols = {"J1": (225, 120, 50), "J2": (60, 110, 210), "PC": (70, 150, 80)}
         for j in self.jugadores:
-            dibujar_animal(s, j.animal, j.rect, j.mira, j.fase)
+            dibujar_animal(s, j.animal, j.rect, j.mira, j.fase, not j.en_suelo)
             etq = self.f_min.render(j.nombre[:9], True, (255, 255, 255))
             bg = pygame.Rect(0, 0, etq.get_width() + 12, 20)
             bg.midbottom = (j.rect.centerx, j.rect.top - 8)
@@ -850,6 +1172,7 @@ class Juego:
     def resumen(self, eventos):
         for e in eventos:
             if e.type == pygame.KEYDOWN and e.key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.sonido.efecto("ok")
                 if not self.supero:
                     self.iniciar_nivel(self.nivel)      # repetir el mismo nivel
                 elif self.nivel + 1 < len(NIVELES):
